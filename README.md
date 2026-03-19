@@ -157,3 +157,132 @@ See `example_usage.py` for a runnable end-to-end example.
 ## Supported bbox formats
 
 All transforms accept any bbox format supported by Albumentations (`yolo`, `pascal_voc`, `coco`, `albumentations`). Pass the format via `A.BboxParams`.
+
+## Ultralytics Integration
+
+This library integrates with [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) training by subclassing the built-in trainer and dataset classes.
+
+### Setup
+
+Install this package into your Ultralytics environment:
+
+```bash
+pip install -e /path/to/data_enhance
+```
+
+### Option 1: Custom Trainer (Recommended)
+
+Subclass `DetectionTrainer` and `YOLODataset` to inject custom transforms into the training pipeline:
+
+```python
+import albumentations as A
+from ultralytics import YOLO
+from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.data.dataset import YOLODataset
+from ultralytics.data.augment import Albumentations
+from data_enhance import BackgroundReplace, BboxRelocate, CrossImageCopyPaste
+
+class CustomAlbumentations(Albumentations):
+    """Extends the built-in Albumentations wrapper with custom transforms."""
+    def __init__(self):
+        super().__init__()
+        extra = [
+            BackgroundReplace(bg_dir="path/to/backgrounds", blend_border=8, p=0.3),
+            BboxRelocate(bg_dir="path/to/backgrounds", allow_overlap=False, p=0.2),
+            CrossImageCopyPaste(
+                image_dir="path/to/images",
+                label_dir="path/to/labels",
+                max_paste=2,
+                p=0.3,
+            ),
+        ]
+        if self.transform:
+            self.transform = A.Compose(
+                self.transform.transforms + extra,
+                bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"]),
+            )
+
+class CustomDataset(YOLODataset):
+    def build_transforms(self, hyp=None):
+        transforms = super().build_transforms(hyp)
+        for i, t in enumerate(transforms.transforms):
+            if isinstance(t, Albumentations):
+                transforms.transforms[i] = CustomAlbumentations()
+                break
+        return transforms
+
+class CustomTrainer(DetectionTrainer):
+    def build_dataset(self, img_path, mode="train", batch=None):
+        return CustomDataset(
+            img_path=img_path,
+            imgsz=self.args.imgsz,
+            batch_size=batch,
+            augment=mode == "train",
+            hyp=self.args,
+            rect=self.args.rect if mode == "val" else False,
+            cache=self.args.cache,
+            single_cls=self.args.single_cls,
+            stride=int(self.stride),
+            pad=0.0 if mode == "train" else 0.5,
+            prefix=f"{mode}: ",
+            task=self.args.task,
+            classes=self.args.classes,
+            data=self.data,
+            fraction=self.args.fraction if mode == "train" else 1.0,
+        )
+
+model = YOLO("yolo11n.pt")
+model.train(trainer=CustomTrainer, data="your_dataset.yaml", epochs=100, imgsz=640)
+```
+
+### Option 2: Callback Hook (Simpler)
+
+Use an `on_train_start` callback to patch the transform pipeline at runtime without subclassing:
+
+```python
+from ultralytics import YOLO
+import albumentations as A
+from ultralytics.data.augment import Albumentations
+from data_enhance import BackgroundReplace
+
+def on_train_start(trainer):
+    dataset = trainer.train_loader.dataset
+    for t in dataset.transforms.transforms:
+        if isinstance(t, Albumentations) and t.transform:
+            t.transform = A.Compose(
+                t.transform.transforms + [
+                    BackgroundReplace(bg_dir="path/to/backgrounds", p=0.3),
+                ],
+                bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"]),
+            )
+            break
+
+model = YOLO("yolo11n.pt")
+model.add_callback("on_train_start", on_train_start)
+model.train(data="your_dataset.yaml", epochs=100)
+```
+
+### Using Mosaic with Ultralytics
+
+`Mosaic` conflicts with the built-in mosaic augmentation. Disable the built-in one first via your dataset YAML or training arguments, then add `Mosaic` to the custom pipeline:
+
+```yaml
+# your_dataset.yaml
+mosaic: 0.0  # disable built-in mosaic
+```
+
+```python
+from data_enhance import Mosaic
+
+extra = [
+    Mosaic(
+        image_dir="path/to/images",
+        label_dir="path/to/labels",
+        img_size=640,
+        p=0.5,
+    ),
+    BackgroundReplace(bg_dir="path/to/backgrounds", p=0.3),
+]
+```
+
+> **Note:** `Mosaic` and `CrossImageCopyPaste` read additional image files from disk. Ensure `image_dir` and `label_dir` point to your training split only — these transforms are automatically skipped during validation (`p` has no effect when `augment=False`).
