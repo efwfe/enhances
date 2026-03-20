@@ -121,9 +121,11 @@ class BackgroundReplace(DualTransform):
         # since we only replace pixels outside bboxes.
         return mask
 
-    def apply_to_bboxes(self, bboxes: Sequence[Any], **params: Any) -> list:
+    def apply_to_bboxes(self, *args: Any, **params: Any) -> Any:
         # Bboxes are untouched (we only change the background).
-        return list(bboxes)
+        # Use *args to avoid name collision when albumentations passes bboxes
+        # both as positional arg and as a keyword param from get_params_dependent_on_data.
+        return args[0]
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return ("bg_dir", "blend_border")
@@ -134,7 +136,7 @@ class BackgroundReplace(DualTransform):
         # Pass current bboxes (already in albumentations normalised format) into apply()
         bboxes = data.get("bboxes", [])
         # Each element: BboxProcessor stores (x_min, y_min, x_max, y_max, *extra)
-        norm_bboxes = [b[:4] for b in bboxes]
+        norm_bboxes = [tuple(b[:4]) for b in bboxes]
         return {"bboxes": norm_bboxes}
 
 
@@ -260,19 +262,22 @@ class BboxRelocate(DualTransform):
 
     def apply_to_bboxes(
         self,
-        bboxes: Sequence[Any],
+        bboxes: Any,
         new_positions: list[tuple[int, int, int, int]] | None = None,
         image_shape: tuple[int, int] | None = None,
         **params: Any,
-    ) -> list:
-        if new_positions is None or not bboxes:
-            return list(bboxes)
+    ) -> Any:
+        is_array = isinstance(bboxes, np.ndarray)
+        if new_positions is None or len(bboxes) == 0:
+            return bboxes
 
         h, w = image_shape if image_shape else (params["rows"], params["cols"])
         updated = []
         for bbox, (nx1, ny1, nx2, ny2) in zip(bboxes, new_positions):
             extra = bbox[4:]
             updated.append((nx1 / w, ny1 / h, nx2 / w, ny2 / h, *extra))
+        if is_array:
+            return np.array(updated, dtype=np.float32)
         return updated
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
@@ -282,7 +287,7 @@ class BboxRelocate(DualTransform):
         self, params: dict[str, Any], data: dict[str, Any]
     ) -> dict[str, Any]:
         bboxes = data.get("bboxes", [])
-        if not bboxes:
+        if len(bboxes) == 0:
             return {"new_positions": None}
 
         img = data["image"]

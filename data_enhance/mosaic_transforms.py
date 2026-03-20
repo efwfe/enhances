@@ -184,12 +184,13 @@ class Mosaic(DualTransform):
 
     def apply_to_bboxes(
         self,
-        bboxes: Sequence[Any],
+        bboxes: Any,
         mosaic_data: dict | None = None,
         **params: Any,
-    ) -> list:
+    ) -> Any:
+        is_array = isinstance(bboxes, np.ndarray)
         if mosaic_data is None:
-            return list(bboxes)
+            return bboxes
 
         s = self.img_size
         cx, cy = mosaic_data["cx"], mosaic_data["cy"]
@@ -221,6 +222,9 @@ class Mosaic(DualTransform):
         result = _remap(bboxes, quad_order[0])
         for i, extra_bbs in enumerate(extra_bboxes_list):
             result.extend(_remap(extra_bbs, quad_order[i + 1]))
+        if is_array:
+            ncols = bboxes.shape[1] if bboxes.ndim == 2 and len(bboxes) > 0 else 5
+            return np.array(result, dtype=np.float32).reshape(-1, ncols) if result else np.empty((0, ncols), dtype=np.float32)
         return result
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
@@ -352,20 +356,24 @@ class CrossImageCopyPaste(DualTransform):
 
     def apply_to_bboxes(
         self,
-        bboxes: Sequence[Any],
+        bboxes: Any,
         paste_items: list[dict] | None = None,
         image_shape: tuple[int, int] | None = None,
         **params: Any,
-    ) -> list:
-        result = list(bboxes)
+    ) -> Any:
+        is_array = isinstance(bboxes, np.ndarray)
         if not paste_items:
-            return result
+            return bboxes
         h, w = image_shape if image_shape else (params["rows"], params["cols"])
-        for item in paste_items:
-            nx1, ny1, nx2, ny2 = item["dst_px"]
-            cls_id = item["cls_id"]
-            result.append((nx1 / w, ny1 / h, nx2 / w, ny2 / h, cls_id))
-        return result
+        new_entries = [
+            (item["dst_px"][0] / w, item["dst_px"][1] / h,
+             item["dst_px"][2] / w, item["dst_px"][3] / h, item["cls_id"])
+            for item in paste_items
+        ]
+        if is_array:
+            new_arr = np.array(new_entries, dtype=np.float32)
+            return np.concatenate([bboxes, new_arr], axis=0) if len(bboxes) > 0 else new_arr
+        return list(bboxes) + new_entries
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
         return (
