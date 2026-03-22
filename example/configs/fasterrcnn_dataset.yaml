@@ -1,0 +1,95 @@
+# ============================================================
+# Faster R-CNN 数据集配置（用于 demo/fasterrcnn_training.py）
+# ============================================================
+
+# ── 数据集格式：coco 或 voc ──────────────────────────────────
+# 选择其中一种，注释掉另一种
+
+# ────────────────────────────────────────
+# COCO JSON 格式（推荐）
+# ────────────────────────────────────────
+dataset:
+  format: coco
+  train_img_dir: /path/to/dataset/train
+  train_ann:     /path/to/dataset/train/_annotations.coco.json
+  val_img_dir:   /path/to/dataset/valid
+  val_ann:       /path/to/dataset/valid/_annotations.coco.json
+
+# ────────────────────────────────────────
+# Pascal VOC XML 格式（取消注释以使用）
+# ────────────────────────────────────────
+# dataset:
+#   format: voc
+#   root: /path/to/VOCdevkit/VOC2012
+#   train_split: ImageSets/Main/train.txt
+#   val_split:   ImageSets/Main/val.txt
+#   class_names:
+#     - aeroplane
+#     - bicycle
+#     - bird
+#     - cat
+#     - dog
+
+# ── 模型配置 ──────────────────────────────────────────────────
+model:
+  pretrained: true          # 使用 COCO 预训练的 ResNet-50 FPN 权重
+
+# ── 训练超参数 ────────────────────────────────────────────────
+train:
+  epochs: 20
+  batch_size: 4
+  num_workers: 2
+  lr: 0.005
+  momentum: 0.9
+  weight_decay: 0.0001
+  lr_step_size: 5           # 每 N 轮将 lr 乘以 lr_gamma
+  lr_gamma: 0.1
+
+# ── data_enhance 增强配置 ─────────────────────────────────────
+augmentation:
+  # 背景替换 / bbox 重定位所需
+  bg_dir: /path/to/backgrounds         # 背景图片目录，设为 null 则禁用
+
+  # 跨图复制粘贴所需（YOLO 格式标注目录）
+  # 如果数据是 COCO 格式，可以先用 scripts/coco_to_yolo.py 转换
+  image_dir: null                      # 训练图片目录（YOLO）
+  label_dir: null                      # 训练标注目录（YOLO .txt）
+
+  # 各增强开关
+  use_bg_replace: true                 # 背景替换（需要 bg_dir）
+  use_bbox_relocate: false             # bbox 随机重定位（需要 bg_dir）
+  use_copy_paste: false                # 跨图复制粘贴（需要 image_dir + label_dir）
+
+  min_visibility: 0.3                  # 增强后 bbox 至少保留原面积的比例
+
+# ── 输出 ──────────────────────────────────────────────────────
+device: cuda                           # cuda / cpu / mps
+output_dir: runs/fasterrcnn
+
+# ── 目录结构参考（COCO 格式）────────────────────────────────────
+#
+# /path/to/dataset/
+# ├── train/
+# │   ├── _annotations.coco.json
+# │   ├── img001.jpg
+# │   └── img002.jpg
+# └── valid/
+#     ├── _annotations.coco.json
+#     └── img003.jpg
+#
+# COCO JSON 结构:
+# {
+#   "images": [
+#     {"id": 1, "file_name": "img001.jpg", "width": 640, "height": 480}
+#   ],
+#   "annotations": [
+#     {"id": 1, "image_id": 1, "category_id": 1,
+#      "bbox": [x_min, y_min, width, height], "area": 5000, "iscrowd": 0}
+#   ],
+#   "categories": [
+#     {"id": 1, "name": "cat"},
+#     {"id": 2, "name": "dog"}
+#   ]
+# }
+#
+# 注意：类别 id 从 1 开始，0 保留给背景类（Faster R-CNN 惯例）
