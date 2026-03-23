@@ -4,7 +4,7 @@ RF-DETR 训练集成 Demo
 将 data_enhance 的自定义增强注入到 RF-DETR（Roboflow）训练流程中。
 
 集成方式：Dataset Wrapper（在线增强）
-- 包装 RF-DETR 内部的 COCO dataset
+- Monkey-patch RFDETRDataModule.setup，在 _dataset_train 构建后立即包装
 - 在每次 __getitem__ 时应用 Albumentations 增强
 - 处理 COCO bbox ↔ YOLO 归一化格式转换
 
@@ -249,30 +249,38 @@ def build_albu_transform(
 # RF-DETR 训练注入
 # ---------------------------------------------------------------------------
 
-def patch_rfdetr_dataset(model, albu_transform: A.Compose, split: str = "train"):
+def _patch_datamodule_setup(albu_transform: A.Compose) -> None:
     """
-    Monkey-patch RF-DETR 模型内部的 train dataset，注入增强。
+    Monkey-patch RFDETRDataModule.setup，在 _dataset_train 构建后立即用
+    AugmentedCocoDataset 包装，train_dataloader() 创建的 DataLoader 就会
+    使用包装后的数据集。
 
-    RF-DETR 在调用 model.train() 前不会构建 dataset，
-    因此通过回调在 fit 开始时注入。
-
-    Args:
-        model: RFDETRBase 实例
-        albu_transform: Albumentations 增强 pipeline
-        split: 要注入增强的数据集分割，通常为 "train"
+    注意：patch 在进程级别生效，调用 model.train() 后应调用 _unpatch_datamodule_setup
+    还原，以免影响后续训练调用。
     """
-    original_build = model._build_dataloader if hasattr(model, "_build_dataloader") else None
+    from rfdetr.training import RFDETRDataModule
 
-    def patched_build_dataloader(dataset, *args, **kwargs):
-        if split in str(getattr(dataset, "root", "")) or split in str(getattr(dataset, "image_dir", "")):
-            print(f"[data_enhance] 注入增强到 {split} dataset")
-            dataset = AugmentedCocoDataset(dataset, albu_transform)
-        if original_build:
-            return original_build(dataset, *args, **kwargs)
-        # 如果没有原始方法，直接返回包装后的 dataset
-        return dataset
+    original_setup = RFDETRDataModule.setup
 
-    return patched_build_dataloader
+    def patched_setup(self, stage: str) -> None:
+        original_setup(self, stage)
+        if stage == "fit" and self._dataset_train is not None:
+            print("[data_enhance] 注入增强到 train dataset")
+            self._dataset_train = AugmentedCocoDataset(self._dataset_train, albu_transform)
+
+    RFDETRDataModule.setup = patched_setup
+    RFDETRDataModule._original_setup = original_setup
+
+
+def _unpatch_datamodule_setup() -> None:
+    """还原 RFDETRDataModule.setup 为原始实现。"""
+    try:
+        from rfdetr.training import RFDETRDataModule
+        if hasattr(RFDETRDataModule, "_original_setup"):
+            RFDETRDataModule.setup = RFDETRDataModule._original_setup
+            del RFDETRDataModule._original_setup
+    except Exception:
+        pass
 
 
 def train_with_rfdetr(
@@ -288,14 +296,13 @@ def train_with_rfdetr(
     use_bbox_relocate: bool = False,
     use_copy_paste: bool = True,
     grad_accum_steps: int = 4,
-    device: str = "cuda",
     output_dir: str = "runs/rfdetr",
 ):
     """
     使用自定义增强训练 RF-DETR 模型。
 
-    RF-DETR 的 API 通过回调（callbacks）机制提供了训练过程的钩子。
-    我们在 on_fit_epoch_start 前注入增强，确保每个 epoch 的数据都经过增强。
+    注入方式：在 model.train() 前 monkey-patch RFDETRDataModule.setup，
+    使 _dataset_train 在构建完成后立即被 AugmentedCocoDataset 包装。
 
     数据集目录结构（COCO 格式）:
         dataset_dir/
@@ -319,12 +326,10 @@ def train_with_rfdetr(
         use_bbox_relocate: 是否启用 bbox 重定位
         use_copy_paste: 是否启用跨图复制粘贴
         grad_accum_steps: 梯度累积步数
-        device: 训练设备
         output_dir: 输出目录
     """
     try:
         from rfdetr import RFDETRBase
-        from rfdetr.util.callbacks import Callbacks
     except ImportError:
         raise ImportError("请先安装 rfdetr: pip install rfdetr")
 
@@ -349,48 +354,21 @@ def train_with_rfdetr(
     print(f"跨图复制粘贴:{'是' if use_copy_paste and image_dir else '否'}")
     print()
 
-    model = RFDETRBase()
-
-    # RF-DETR 通过 callbacks 机制暴露训练钩子
-    # 在 on_train_start 时包装 train dataloader 的 dataset
-    injected = {"done": False}
-
-    def on_train_start(trainer=None, **kwargs):
-        if injected["done"]:
-            return
-        # 尝试从 trainer 或 model 内部找到 train dataset 并注入增强
-        target = trainer if trainer is not None else model
-        for attr_name in ("train_dataset", "train_loader", "_train_dataset"):
-            dataset = getattr(target, attr_name, None)
-            if dataset is None:
-                continue
-            # 如果是 DataLoader，取其 dataset
-            if hasattr(dataset, "dataset"):
-                dataset = dataset.dataset
-            wrapped = AugmentedCocoDataset(dataset, albu_transform)
-            if hasattr(dataset, "dataset"):
-                # 替换 DataLoader 内部的 dataset
-                target_loader = getattr(target, attr_name)
-                target_loader.dataset = wrapped
-            else:
-                setattr(target, attr_name, wrapped)
-            print(f"[data_enhance] 成功注入增强到 {attr_name}")
-            injected["done"] = True
-            break
-
-    callbacks = Callbacks()
-    callbacks.register("on_train_start", on_train_start)
-
-    model.train(
-        dataset_dir=dataset_dir,
-        epochs=epochs,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        lr=lr,
-        resolution=resolution,
-        output_dir=output_dir,
-        callbacks=callbacks,
-    )
+    # 注入增强：patch DataModule.setup，train() 内部构建数据集时自动生效
+    _patch_datamodule_setup(albu_transform)
+    try:
+        model = RFDETRBase()
+        model.train(
+            dataset_dir=dataset_dir,
+            epochs=epochs,
+            batch_size=batch_size,
+            grad_accum_steps=grad_accum_steps,
+            lr=lr,
+            resolution=resolution,
+            output_dir=output_dir,
+        )
+    finally:
+        _unpatch_datamodule_setup()
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +385,6 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
     parser.add_argument("--resolution", type=int, default=560, help="输入分辨率")
     parser.add_argument("--grad-accum-steps", type=int, default=4, help="梯度累积步数")
-    parser.add_argument("--device", default="cuda", help="训练设备")
     parser.add_argument("--output-dir", default="runs/rfdetr", help="输出目录")
 
     # 增强配置
@@ -437,7 +414,6 @@ def main():
         use_bbox_relocate=args.use_bbox_relocate,
         use_copy_paste=args.use_copy_paste,
         grad_accum_steps=args.grad_accum_steps,
-        device=args.device,
         output_dir=args.output_dir,
     )
 
