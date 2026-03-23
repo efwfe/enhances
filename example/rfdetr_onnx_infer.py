@@ -14,11 +14,11 @@ ONNX 模型 I/O：
        boxes  [1, Q, 4]     float32，[cx, cy, w, h] 归一化坐标
 
 用法示例：
-  # 导出
+  # 导出（分辨率必须被 32 整除，推荐 448）
   python rfdetr_onnx_infer.py export \
       --weights runs/rfdetr/checkpoint.pth \
       --output model.onnx \
-      --resolution 560
+      --resolution 448
 
   # 单张推理
   python rfdetr_onnx_infer.py infer \
@@ -48,6 +48,27 @@ import numpy as np
 # ImageNet 归一化参数
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# DINOv2 backbone 要求输入尺寸同时能被 patch_size=14 和 stride=32 整除
+# 即必须是 LCM(14, 32)=224 的倍数：224, 448, 672, 896...
+_BACKBONE_STRIDE = 32
+_DINOV2_PATCH    = 14
+
+
+def _validate_resolution(resolution: int) -> int:
+    """
+    检查分辨率是否满足 DINOv2 backbone 约束（需被 32 整除）。
+    如果不满足则报错，并提示最近的合法值。
+    """
+    if resolution % _BACKBONE_STRIDE != 0:
+        lo = (resolution // _BACKBONE_STRIDE) * _BACKBONE_STRIDE
+        hi = lo + _BACKBONE_STRIDE
+        raise ValueError(
+            f"分辨率 {resolution} 不能被 {_BACKBONE_STRIDE} 整除，"
+            f"DINOv2 backbone 会报 AssertionError。\n"
+            f"请改用 {lo} 或 {hi}（推荐 448）。"
+        )
+    return resolution
 
 # 支持的图片扩展名
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -208,7 +229,7 @@ class RFDETROnnxInfer:
     def __init__(
         self,
         model_path: str,
-        resolution: int = 560,
+        resolution: int = 448,
         conf_threshold: float = 0.5,
         class_names: list[str] | None = None,
         providers: list[str] | None = None,
@@ -218,6 +239,7 @@ class RFDETROnnxInfer:
         except ImportError:
             raise ImportError("请先安装 onnxruntime: pip install onnxruntime  或  pip install onnxruntime-gpu")
 
+        _validate_resolution(resolution)
         if providers is None:
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         self.session = ort.InferenceSession(model_path, providers=providers)
@@ -278,7 +300,7 @@ class RFDETROnnxInfer:
 def export_onnx(
     weights: str,
     output: str,
-    resolution: int = 560,
+    resolution: int = 448,
     opset: int = 17,
     simplify: bool = True,
 ) -> None:
@@ -298,6 +320,8 @@ def export_onnx(
         from rfdetr import RFDETRBase
     except ImportError:
         raise ImportError("请先安装 rfdetr: pip install rfdetr")
+
+    _validate_resolution(resolution)
 
     print(f"[export] 加载权重: {weights}")
     model = RFDETRBase(pretrain_weights=weights)
@@ -486,7 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="导出 RF-DETR 模型为 ONNX 格式")
     p_export.add_argument("--weights",    required=True, help="RF-DETR 训练权重路径（.pth）")
     p_export.add_argument("--output",     default="rfdetr.onnx", help="ONNX 输出路径")
-    p_export.add_argument("--resolution", type=int, default=560, help="输入分辨率（默认 560）")
+    p_export.add_argument("--resolution", type=int, default=448, help="输入分辨率，需被 32 整除（默认 448）")
     p_export.add_argument("--opset",      type=int, default=17,  help="ONNX opset 版本（默认 17）")
     p_export.add_argument("--no-simplify", action="store_true",  help="跳过 onnxsim 简化")
 
@@ -495,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_infer.add_argument("--model",       required=True, help="ONNX 模型路径")
     p_infer.add_argument("--source",      required=True, help="输入图片路径或目录")
     p_infer.add_argument("--conf",        type=float, default=0.5, help="置信度阈值（默认 0.5）")
-    p_infer.add_argument("--resolution",  type=int, default=560,   help="模型输入分辨率（默认 560）")
+    p_infer.add_argument("--resolution",  type=int, default=448,   help="模型输入分辨率，需被 32 整除（默认 448）")
     p_infer.add_argument("--labels-file", default=None,
                          help="类别名称文件（每行一个类别名，或 COCO JSON）")
     p_infer.add_argument("--output-dir",  default=None, help="可视化结果保存目录")

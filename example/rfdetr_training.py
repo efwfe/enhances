@@ -383,7 +383,7 @@ def train_with_rfdetr(
     epochs: int = 50,
     batch_size: int = 4,
     lr: float = 1e-4,
-    resolution: int = 560,
+    resolution: int = 448,
     bg_dir: str | None = None,
     image_dir: str | None = None,
     label_dir: str | None = None,
@@ -483,7 +483,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="训练轮数")
     parser.add_argument("--batch-size", type=int, default=4, help="batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
-    parser.add_argument("--resolution", type=int, default=560, help="输入分辨率")
+    parser.add_argument("--resolution", type=int, default=448, help="输入分辨率，需被 32 整除（默认 448）")
     parser.add_argument("--grad-accum-steps", type=int, default=4, help="梯度累积步数")
     parser.add_argument("--output-dir", default="runs/rfdetr", help="输出目录")
     parser.add_argument("--model-size", default="nano",
