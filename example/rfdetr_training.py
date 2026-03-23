@@ -195,20 +195,30 @@ def build_albu_transform(
     use_bbox_relocate: bool = False,
     use_copy_paste: bool = True,
     imgsz: int = 560,
+    augmentation_level: str = "heavy",
 ) -> A.Compose:
     """
     构建用于 RF-DETR 的 Albumentations transform pipeline。
 
-    注意：不在此处使用 Mosaic，因为 RF-DETR 有自己的多尺度处理。
-    如需 Mosaic，建议在离线预处理阶段使用。
+    针对小数据集（~250张）身份证正反面检测做了专项增强：
+    - 几何变换：透视、旋转、平移缩放（模拟不同拍摄角度）
+    - 光照变换：亮度对比度、阴影、HSV 调整（模拟室内外不同光源）
+    - 质量退化：运动模糊、高斯噪声、JPEG 压缩（模拟手持拍摄和压缩）
+    - 遮挡模拟：CoarseDropout（模拟部分遮挡）
+    - 背景替换 / CopyPaste：利用 data_enhance 提供的自定义增强
+
+    Args:
+        augmentation_level: "light" | "medium" | "heavy"，数据量越少越应选 heavy
     """
     from data_enhance import BackgroundReplace, BboxRelocate, CrossImageCopyPaste
 
     transforms = []
 
+    # ---------- data_enhance 特有增强 ----------
     if use_bg_replace and bg_dir:
+        # 背景替换：让模型适应各种背景环境
         transforms.append(
-            BackgroundReplace(bg_dir=bg_dir, blend_border=8, p=0.3)
+            BackgroundReplace(bg_dir=bg_dir, blend_border=8, p=0.4)
         )
 
     if use_bbox_relocate and bg_dir:
@@ -221,26 +231,111 @@ def build_albu_transform(
             CrossImageCopyPaste(
                 image_dir=image_dir,
                 label_dir=label_dir,
-                max_paste=3,
-                scale_range=(0.5, 1.2),
+                max_paste=2,
+                scale_range=(0.4, 1.0),
                 allow_overlap=False,
                 p=0.4,
             )
         )
 
-    # 追加一些通用增强
-    transforms.extend([
-        A.HorizontalFlip(p=0.5),
-        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.4),
-        A.GaussianBlur(blur_limit=(3, 7), p=0.1),
-    ])
+    # ---------- 几何变换（身份证拍摄角度变化） ----------
+    # 透视变换：最重要的增强，模拟非正面拍摄
+    transforms.append(
+        A.Perspective(scale=(0.04, 0.12), keep_size=True, p=0.6)
+    )
+
+    # 旋转：身份证放置角度
+    transforms.append(
+        A.SafeRotate(limit=20, border_mode=0, p=0.6)
+    )
+
+    # 平移 + 缩放 + 轻微剪切
+    transforms.append(
+        A.ShiftScaleRotate(
+            shift_limit=0.06,
+            scale_limit=(-0.2, 0.3),  # 缩小到 0.8x，放大到 1.3x
+            rotate_limit=0,           # 旋转已由 SafeRotate 处理
+            border_mode=0,
+            p=0.5,
+        )
+    )
+
+    # 水平/垂直翻转（身份证正反面的镜像场景）
+    transforms.append(A.HorizontalFlip(p=0.5))
+    transforms.append(A.VerticalFlip(p=0.1))
+
+    # ---------- 光照 / 颜色变换 ----------
+    transforms.append(
+        A.RandomBrightnessContrast(
+            brightness_limit=(-0.3, 0.3),
+            contrast_limit=(-0.3, 0.3),
+            p=0.7,
+        )
+    )
+
+    transforms.append(
+        A.HueSaturationValue(
+            hue_shift_limit=12,
+            sat_shift_limit=40,
+            val_shift_limit=30,
+            p=0.5,
+        )
+    )
+
+    # 随机阴影：模拟室内灯光或手持遮挡产生的阴影
+    transforms.append(
+        A.RandomShadow(
+            shadow_roi=(0, 0, 1, 1),
+            num_shadows_limit=(1, 2),
+            shadow_dimension=5,
+            p=0.3,
+        )
+    )
+
+    # CLAHE：增强低对比度/过曝场景
+    transforms.append(A.CLAHE(clip_limit=4.0, p=0.2))
+
+    # ---------- 质量退化（模拟手机相机） ----------
+    transforms.append(
+        A.OneOf([
+            A.GaussianBlur(blur_limit=(3, 7)),
+            A.MotionBlur(blur_limit=(3, 9)),   # 手持抖动
+            A.MedianBlur(blur_limit=5),
+        ], p=0.4)
+    )
+
+    # 高斯噪声 / ISO 噪声：低光环境
+    transforms.append(
+        A.OneOf([
+            A.GaussNoise(std_range=(0.05, 0.15)),
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.4)),
+        ], p=0.35)
+    )
+
+    # JPEG 压缩：手机拍摄后发送的图片普遍有压缩
+    transforms.append(
+        A.ImageCompression(quality_range=(50, 95), p=0.4)
+    )
+
+    # ---------- 遮挡模拟 ----------
+    # CoarseDropout：模拟手指/物体遮挡身份证部分区域
+    transforms.append(
+        A.CoarseDropout(
+            num_holes_range=(1, 4),
+            hole_height_range=(0.05, 0.15),
+            hole_width_range=(0.05, 0.20),
+            fill=0,
+            p=0.3,
+        )
+    )
 
     return A.Compose(
         transforms,
         bbox_params=A.BboxParams(
             format="yolo",
             label_fields=["class_labels"],
-            min_visibility=0.3,
+            min_visibility=0.25,    # 遮挡较重时仍保留 bbox
+            clip=True,
         ),
     )
 
@@ -298,6 +393,7 @@ def train_with_rfdetr(
     grad_accum_steps: int = 4,
     output_dir: str = "runs/rfdetr",
     model_size: str = "nano",
+    augmentation_level: str = "heavy",
 ):
     """
     使用自定义增强训练 RF-DETR 模型。
@@ -343,6 +439,7 @@ def train_with_rfdetr(
         use_bbox_relocate=use_bbox_relocate,
         use_copy_paste=use_copy_paste,
         imgsz=resolution,
+        augmentation_level=augmentation_level,
     )
 
     print("=== data_enhance RF-DETR 训练 Demo ===")
@@ -350,6 +447,7 @@ def train_with_rfdetr(
     print(f"训练轮数:    {epochs}")
     print(f"Batch size:  {batch_size}")
     print(f"分辨率:      {resolution}")
+    print(f"增强强度:    {augmentation_level}")
     print(f"背景替换:    {'是' if use_bg_replace and bg_dir else '否'}")
     print(f"Bbox重定位:  {'是' if use_bbox_relocate and bg_dir else '否'}")
     print(f"跨图复制粘贴:{'是' if use_copy_paste and image_dir else '否'}")
@@ -402,6 +500,9 @@ def main():
     parser.add_argument("--use-bbox-relocate", action="store_true", default=False)
     parser.add_argument("--use-copy-paste", action="store_true", default=True)
     parser.add_argument("--no-copy-paste", dest="use_copy_paste", action="store_false")
+    parser.add_argument("--augmentation-level", default="heavy",
+                        choices=["light", "medium", "heavy"],
+                        help="增强强度，小数据集推荐 heavy")
 
     args = parser.parse_args()
 
@@ -420,6 +521,7 @@ def main():
         grad_accum_steps=args.grad_accum_steps,
         output_dir=args.output_dir,
         model_size=args.model_size,
+        augmentation_level=args.augmentation_level,
     )
 
 
