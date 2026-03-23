@@ -55,6 +55,57 @@ def _union_mask(bboxes_norm: list[tuple[float, float, float, float]],
     return mask
 
 
+def _grabcut_mask(
+    img: np.ndarray,
+    bboxes_norm: list[tuple[float, float, float, float]],
+    h: int,
+    w: int,
+    iter_count: int = 5,
+) -> np.ndarray:
+    """
+    Build a foreground mask using GrabCut initialized with each bbox rect.
+    For each bbox, GrabCut iterates to separate foreground from background.
+    Falls back to rectangular mask for tiny boxes or on errors.
+
+    Returns uint8 mask (h, w) where foreground pixels == 255.
+    """
+    # GrabCut requires 3-channel uint8
+    if img.ndim != 3 or img.shape[2] != 3:
+        return _union_mask(bboxes_norm, h, w)
+    img_u8 = img if img.dtype == np.uint8 else img.astype(np.uint8)
+
+    combined = np.zeros((h, w), dtype=np.uint8)
+    for x_min, y_min, x_max, y_max in bboxes_norm:
+        x1 = int(round(x_min * w))
+        y1 = int(round(y_min * h))
+        x2 = int(round(x_max * w))
+        y2 = int(round(y_max * h))
+        x1, x2 = max(0, x1), min(w, x2)
+        y1, y2 = max(0, y1), min(h, y2)
+        bw, bh = x2 - x1, y2 - y1
+        # GrabCut needs a minimum region size to fit its GMM models
+        if bw < 4 or bh < 4:
+            combined[y1:y2, x1:x2] = 255
+            continue
+        gc_mask = np.zeros((h, w), dtype=np.uint8)
+        bgd_model = np.zeros((1, 65), dtype=np.float64)
+        fgd_model = np.zeros((1, 65), dtype=np.float64)
+        try:
+            cv2.grabCut(
+                img_u8, gc_mask, (x1, y1, bw, bh),
+                bgd_model, fgd_model, iter_count, cv2.GC_INIT_WITH_RECT,
+            )
+            fg = np.where(
+                (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD), 255, 0
+            ).astype(np.uint8)
+            combined = cv2.bitwise_or(combined, fg)
+        except Exception:
+            # Fallback: rectangular mask
+            combined[y1:y2, x1:x2] = 255
+
+    return combined
+
+
 # ---------------------------------------------------------------------------
 # BackgroundReplace
 # ---------------------------------------------------------------------------
@@ -64,12 +115,20 @@ class BackgroundReplace(DualTransform):
     Replace the area **outside** all bounding boxes with a randomly chosen
     background image from *bg_dir*.
 
+    When *use_grabcut* is True (default), GrabCut is run for each bbox to
+    extract the foreground at pixel level before replacing the background,
+    avoiding rectangular background remnants inside the bbox region.
+    Falls back to a rectangular mask for very small boxes or on errors.
+
     The bounding boxes and their labels are kept unchanged.
 
     Args:
         bg_dir (str | Path): Directory containing background images.
-        blend_border (int): Width (pixels) of a blending region on the bbox
-            edges to reduce hard seams.  0 = hard cut.
+        blend_border (int): Width (pixels) of a Gaussian blending region on
+            the foreground mask edges to reduce hard seams.  0 = hard cut.
+        use_grabcut (bool): If True, use GrabCut to extract per-pixel
+            foreground masks.  If False, use rectangular bbox masks.
+        grabcut_iters (int): Number of GrabCut iterations per bbox.
         p (float): Probability of applying this transform.
     """
 
@@ -77,11 +136,15 @@ class BackgroundReplace(DualTransform):
         self,
         bg_dir: str | Path,
         blend_border: int = 0,
+        use_grabcut: bool = True,
+        grabcut_iters: int = 5,
         p: float = 0.5,
     ) -> None:
         super().__init__(p=p)
         self.bg_dir = Path(bg_dir)
         self.blend_border = blend_border
+        self.use_grabcut = use_grabcut
+        self.grabcut_iters = grabcut_iters
 
     # ------------------------------------------------------------------
     # Albumentations API
@@ -97,7 +160,11 @@ class BackgroundReplace(DualTransform):
         elif img.shape[2] == 4:
             bg = cv2.cvtColor(bg, cv2.COLOR_RGB2RGBA)
 
-        mask = _union_mask(list(bboxes), h, w)  # 255 inside bbox
+        norm_bboxes = list(bboxes)
+        if self.use_grabcut:
+            mask = _grabcut_mask(img, norm_bboxes, h, w, self.grabcut_iters)
+        else:
+            mask = _union_mask(norm_bboxes, h, w)
 
         if self.blend_border > 0:
             kernel_size = 2 * self.blend_border + 1
@@ -128,7 +195,7 @@ class BackgroundReplace(DualTransform):
         return args[0]
 
     def get_transform_init_args_names(self) -> tuple[str, ...]:
-        return ("bg_dir", "blend_border")
+        return ("bg_dir", "blend_border", "use_grabcut", "grabcut_iters")
 
     def get_params_dependent_on_data(
         self, params: dict[str, Any], data: dict[str, Any]
