@@ -36,6 +36,19 @@ def _load_random_bg(bg_dir: Path, target_h: int, target_w: int) -> np.ndarray:
     return cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
 
+def _load_bg_native(bg_dir: Path) -> np.ndarray:
+    """Pick a random image from *bg_dir* and return it at its native resolution (RGB)."""
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    files = [p for p in bg_dir.iterdir() if p.suffix.lower() in exts]
+    if not files:
+        raise FileNotFoundError(f"No image files found in background directory: {bg_dir}")
+    path = random.choice(files)
+    img = cv2.imread(str(path))
+    if img is None:
+        raise IOError(f"Could not read background image: {path}")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
 def _union_mask(bboxes_norm: list[tuple[float, float, float, float]],
                 h: int, w: int) -> np.ndarray:
     """
@@ -151,13 +164,26 @@ class BackgroundReplace(DualTransform):
     # ------------------------------------------------------------------
 
     def apply(self, img: np.ndarray, bboxes: Sequence[tuple] = (), **params: Any) -> np.ndarray:
-        h, w = img.shape[:2]
-        bg = _load_random_bg(self.bg_dir, h, w)
+        # Load background at native resolution, then unify to the lower of the two.
+        bg = _load_bg_native(self.bg_dir)
+        bg_h, bg_w = bg.shape[:2]
+        img_h, img_w = img.shape[:2]
+
+        out_h = min(img_h, bg_h)
+        out_w = min(img_w, bg_w)
+
+        # Downscale whichever side is larger (INTER_AREA gives best quality when shrinking)
+        if (img_h, img_w) != (out_h, out_w):
+            img = cv2.resize(img, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        if (bg_h, bg_w) != (out_h, out_w):
+            bg = cv2.resize(bg, (out_w, out_h), interpolation=cv2.INTER_AREA)
+
+        h, w = out_h, out_w
 
         # Make sure bg has same channel count as img
         if img.ndim == 2:
             bg = cv2.cvtColor(bg, cv2.COLOR_RGB2GRAY)
-        elif img.shape[2] == 4:
+        elif img.ndim == 3 and img.shape[2] == 4:
             bg = cv2.cvtColor(bg, cv2.COLOR_RGB2RGBA)
 
         norm_bboxes = list(bboxes)
