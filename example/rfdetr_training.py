@@ -297,6 +297,7 @@ def train_with_rfdetr(
     use_copy_paste: bool = True,
     grad_accum_steps: int = 4,
     output_dir: str = "runs/rfdetr",
+    model_size: str = "nano",
 ):
     """
     使用自定义增强训练 RF-DETR 模型。
@@ -329,7 +330,7 @@ def train_with_rfdetr(
         output_dir: 输出目录
     """
     try:
-        from rfdetr import RFDETRBase
+        from rfdetr import RFDETRBase, RFDETRSmall, RFDETRNano  # noqa: F401
     except ImportError:
         raise ImportError("请先安装 rfdetr: pip install rfdetr")
 
@@ -357,7 +358,8 @@ def train_with_rfdetr(
     # 注入增强：patch DataModule.setup，train() 内部构建数据集时自动生效
     _patch_datamodule_setup(albu_transform)
     try:
-        model = RFDETRBase()
+        _model_cls = {"nano": RFDETRNano, "small": RFDETRSmall, "base": RFDETRBase}.get(model_size, RFDETRNano)
+        model = _model_cls()
         model.train(
             dataset_dir=dataset_dir,
             epochs=epochs,
@@ -386,6 +388,8 @@ def main():
     parser.add_argument("--resolution", type=int, default=560, help="输入分辨率")
     parser.add_argument("--grad-accum-steps", type=int, default=4, help="梯度累积步数")
     parser.add_argument("--output-dir", default="runs/rfdetr", help="输出目录")
+    parser.add_argument("--model-size", default="nano",
+                        choices=["nano", "small", "base"], help="模型大小")
 
     # 增强配置
     parser.add_argument("--bg-dir", default=None, help="背景图片目录")
@@ -415,6 +419,7 @@ def main():
         use_copy_paste=args.use_copy_paste,
         grad_accum_steps=args.grad_accum_steps,
         output_dir=args.output_dir,
+        model_size=args.model_size,
     )
 
 
