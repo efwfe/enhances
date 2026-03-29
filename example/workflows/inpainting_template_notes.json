@@ -1,0 +1,90 @@
+{
+  "_notes": [
+    "This is NOT a runnable workflow — it shows which fields to replace with __PLACEHOLDER__ markers.",
+    "Export your real workflow from ComfyUI (Save → Save API Format), then replace the values below.",
+    "",
+    "For SD/SDXL inpainting:",
+    "  - LoadImage node for scene:  set 'image' to '__INPUT_IMAGE__'",
+    "  - LoadImage node for mask:   set 'image' to '__MASK_IMAGE__'  (white = region to fill)",
+    "  - CLIPTextEncode (positive): set 'text' to '__PROMPT__'",
+    "",
+    "The mask uploaded by BboxScaleAugmentor is a white-on-black PNG where white marks",
+    "the original bbox area (the hole to fill).  Make sure your inpainting model uses",
+    "the same convention — or invert the mask node in ComfyUI if needed.",
+    "",
+    "Tip: keep the positive prompt generic, e.g. 'background, seamless, high quality',",
+    "so the model fills the hole with plausible background content."
+  ],
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__INPUT_IMAGE__",
+      "upload": "image"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__MASK_IMAGE__",
+      "upload": "image"
+    }
+  },
+  "3": {
+    "class_type": "VAEEncodeForInpaint",
+    "inputs": {
+      "pixels": ["1", 0],
+      "vae": ["5", 0],
+      "mask": ["2", 1],
+      "grow_mask_by": 6
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "__PROMPT__",
+      "clip": ["5", 1]
+    }
+  },
+  "5": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_base_1.0_inpainting_0.1.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["5", 0],
+      "positive": ["4", 0],
+      "negative": ["7", 0],
+      "latent_image": ["3", 0],
+      "seed": 0,
+      "steps": 20,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "text, watermark, blurry, person, object",
+      "clip": ["5", 1]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["6", 0],
+      "vae": ["5", 0]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["8", 0],
+      "filename_prefix": "inpaint_output"
+    }
+  }
+}

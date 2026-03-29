@@ -1,0 +1,42 @@
+{
+  "_notes": [
+    "This is NOT a runnable workflow — it shows which fields to replace with __PLACEHOLDER__ markers.",
+    "Export your real workflow from ComfyUI (Save → Save API Format), then replace the values below.",
+    "",
+    "For Zero123++ / Wonder3D / SyncDreamer:",
+    "  - Find the LoadImage node and set its 'image' field to '__INPUT_IMAGE__'",
+    "  - Find the multi-view model node and set 'azimuth' to '__AZIMUTH__', 'elevation' to '__ELEVATION__'",
+    "",
+    "For models that output a grid of views (e.g. 2x2), the pipeline will use the first",
+    "downloaded image.  If your model outputs individual images per view, the pipeline will",
+    "collect all of them.  ComfyUI reports all SaveImage node outputs.",
+    "",
+    "The patch_workflow() function does JSON-string substitution:",
+    "  patch_workflow(template, INPUT_IMAGE='crop.png', AZIMUTH=45, ELEVATION=0)",
+    "  replaces '__INPUT_IMAGE__' -> 'crop.png', '__AZIMUTH__' -> 45, '__ELEVATION__' -> 0"
+  ],
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__INPUT_IMAGE__",
+      "upload": "image"
+    }
+  },
+  "2": {
+    "class_type": "Zero123PlusPlus",
+    "inputs": {
+      "image": ["1", 0],
+      "azimuth": "__AZIMUTH__",
+      "elevation": "__ELEVATION__",
+      "steps": 75,
+      "cfg_scale": 4.0
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": ["2", 0],
+      "filename_prefix": "mv_output"
+    }
+  }
+}
